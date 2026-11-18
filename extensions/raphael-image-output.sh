@@ -64,6 +64,122 @@ function raphael_image_output_cleanup() {
 	_RAPHAEL_LOOPS=()
 }
 
+# xfdesktop keys the backdrop on the XRandR output name. The phone's internal
+# panel is "DSI-1", but Armbian's xfce4-desktop.xml only lists monitor0/1 and
+# the HDMI/eDP/Virtual outputs, so a fresh home directory comes up with a bare
+# grey screen. Add a monitorDSI-1 entry to /etc/skel and to every user home.
+function raphael_configure_xfce_backdrop() {
+	local root="$1"
+	local bg_dir="${root}/usr/share/backgrounds/armbian"
+	local bg=""
+
+	for bg in "${bg_dir}/armbian03-Dre0x-Minum-dark-3840x2160.jpg" \
+		"${bg_dir}/armbian03-Dre0x-Minum-dark-3840x2160.png"; do
+		[[ -f "${bg}" ]] && break || bg=""
+	done
+	if [[ -z "${bg}" ]]; then
+		bg="$(find "${bg_dir}" -maxdepth 1 -type f \( -name '*.jpg' -o -name '*.png' \) 2> /dev/null | sort | head -1)"
+	fi
+	[[ -n "${bg}" ]] || return 0
+	bg="${bg#"${root}"}"
+
+	python3 - "${root}" "${bg}" << 'PY'
+import os
+import re
+import stat
+import sys
+
+root, image = sys.argv[1], sys.argv[2]
+rel = ".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
+
+MINIMAL = """<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="screen0" type="empty">
+    </property>
+  </property>
+</channel>
+"""
+
+
+def entries(indent):
+    out = []
+    for workspace in ("workspace0", "workspace1"):
+        out.append(
+            f'{indent}<property name="{workspace}" type="empty">\n'
+            f'{indent}\t<property name="color-style" type="int" value="0"/>\n'
+            f'{indent}\t<property name="image-style" type="int" value="5"/>\n'
+            f'{indent}\t<property name="image-path" type="string" value="{image}"/>\n'
+            f'{indent}\t<property name="last-image" type="string" value="{image}"/>\n'
+            f'{indent}</property>\n'
+        )
+    return "".join(out)
+
+
+def patch(text):
+    if 'monitorDSI-1' in text:
+        return text
+    match = re.search(r'^([ \t]*)<property name="screen0" type="empty">[^\n]*\n',
+                      text, re.M)
+    if match:
+        indent = match.group(1) + "\t"
+        block = f'{match.group(1)}\t<property name="monitorDSI-1" type="empty">\n' \
+                + entries(indent + "\t") \
+                + f'{match.group(1)}\t</property>\n'
+        return text[:match.end()] + block + text[match.end():]
+    match = re.search(r'^([ \t]*)</channel>', text, re.M)
+    if match:
+        indent = match.group(1) + "\t"
+        block = (f'{indent}<property name="backdrop" type="empty">\n'
+                 f'{indent}\t<property name="screen0" type="empty">\n'
+                 f'{indent}\t\t<property name="monitorDSI-1" type="empty">\n'
+                 + entries(indent + "\t\t\t")
+                 + f'{indent}\t\t</property>\n'
+                 f'{indent}\t</property>\n'
+                 f'{indent}</property>\n')
+        return text[:match.start()] + block + text[match.start():]
+    return text
+
+
+def configure(path, uid, gid):
+    if os.path.exists(path):
+        text = open(path, encoding="utf-8").read()
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        text = MINIMAL
+    new = patch(text)
+    if new == text and os.path.exists(path):
+        return False
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(new)
+    # Keep the created path components owned by the account that uses them.
+    cur = path
+    parent = os.path.dirname(os.path.dirname(path))  # .config/xfce4
+    while cur.startswith(parent):
+        try:
+            os.chown(cur, uid, gid)
+        except PermissionError:
+            break
+        cur = os.path.dirname(cur)
+    return True
+
+
+targets = [(os.path.join(root, "etc/skel", rel), 0, 0)]
+homes = os.path.join(root, "home")
+if os.path.isdir(homes):
+    for name in sorted(os.listdir(homes)):
+        home = os.path.join(homes, name)
+        if name == "lost+found" or not os.path.isdir(home):
+            continue
+        st = os.stat(home)
+        targets.append((os.path.join(home, rel), st.st_uid, st.st_gid))
+
+for path, uid, gid in targets:
+    if configure(path, uid, gid):
+        print("xfce backdrop: configured", os.path.relpath(path, root))
+PY
+}
+
 function post_build_image__900_raphael_images() {
 	[[ -z "${version}" ]] && exit_with_error "version is not set"
 
@@ -150,6 +266,8 @@ function post_build_image__900_raphael_images() {
 		fi
 		display_alert "Recreated missing home directory" "${p_home} for ${p_name} (uid ${p_uid})" "info"
 	done < "${old_root}/etc/passwd"
+
+	raphael_configure_xfce_backdrop "${old_root}"
 
 	# /boot is the vendor partition once fstab is in effect; keep only the mount
 	# points so the duplicated kernel/initrd/DTB payload is not shipped twice.
