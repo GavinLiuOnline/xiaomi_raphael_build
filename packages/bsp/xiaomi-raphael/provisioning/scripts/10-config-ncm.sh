@@ -22,6 +22,19 @@ cat > rootdir/etc/dnsmasq.d/usb-ncm-hosts.conf << 'EOF'
 # dhcp-host=2e:dc:b4:8b:6c:1f,172.16.42.2
 EOF
 echo "net.ipv4.ip_forward=1" | tee rootdir/etc/sysctl.d/99-usb-ncm.conf
+
+# setup-usb-ncm.sh 会重启 dnsmasq；若 dnsmasq 仍挂着网络在线依赖，重启会把
+# network-online.target 拉进启动事务，与 usb0 等待形成环（实测曾阻塞 8 分钟）。
+install -d rootdir/etc/systemd/system/dnsmasq.service.d
+cat > rootdir/etc/systemd/system/dnsmasq.service.d/raphael-no-network-online.conf << 'EOF'
+[Unit]
+# Break the usb-ncm -> dnsmasq -> network-online -> usb0 dependency loop.
+# dnsmasq only serves DHCP on usb0; there is no upstream to wait for.
+Requires=
+Wants=
+After=network.target
+Before=
+EOF
 chroot rootdir systemctl enable dnsmasq
 
 echo "[$(date +'%Y-%m-%d %H:%M:%S')] [10]   └─ 配置 NetworkManager 托管 usb0"
@@ -52,6 +65,19 @@ never-default=true
 method=ignore
 EOF
 chmod 600 rootdir/etc/NetworkManager/system-connections/USB-NCM.nmconnection
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] [10]   └─ WiFi 韧性配置（重连不放弃 / 扫描不随机 MAC）"
+cat > rootdir/etc/NetworkManager/conf.d/raphael-wifi.conf << 'EOF'
+[connection]
+# WCN3990 固件在开机早期偶发 install-key 超时 (-110)，连接会被反复断开
+# 重连。默认 4 次重试用完后 NetworkManager 就放弃，表现为"重启后连不上"。
+# 改成无限重试，等固件稳定后自动恢复，无需人工干预。
+connection.autoconnect-retries=0
+
+[device]
+# 扫描不要随机 MAC，避免 AP 在每次启动时把设备当成新客户端。
+wifi.scan-rand-mac-address=no
+EOF
 
 cat > rootdir/usr/local/sbin/setup-usb-ncm.sh << 'EOF'
 #!/bin/sh
@@ -113,7 +139,7 @@ if [ -n "$OUT" ] && [ "$OUT" != "lo" ]; then
 	iptables -C FORWARD -i usb0 -o "$OUT" -j ACCEPT 2>/dev/null || \
 		iptables -A FORWARD -i usb0 -o "$OUT" -j ACCEPT
 fi
-systemctl restart dnsmasq || true
+systemctl restart --no-block dnsmasq || true
 EOF
 chmod +x rootdir/usr/local/sbin/setup-usb-ncm.sh
 cat > rootdir/etc/systemd/system/usb-ncm.service << 'EOF'
@@ -125,6 +151,8 @@ DefaultDependencies=no
 
 [Service]
 Type=oneshot
+# 启动脚本自身最多占 60s，绝不无限期拖住 multi-user.target
+TimeoutStartSec=60
 ExecStart=/usr/local/sbin/setup-usb-ncm.sh
 RemainAfterExit=yes
 

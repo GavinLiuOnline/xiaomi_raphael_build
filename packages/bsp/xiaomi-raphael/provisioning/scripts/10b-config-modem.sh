@@ -167,8 +167,10 @@ Type=oneshot
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=24
+StartLimitIntervalSec=120
+StartLimitBurst=3
+# 无 SIM 时最坏阻塞 3×20s；QMI 卡死也只等 45s，不再拖住开机
+TimeoutStartSec=45
 ExecStart=/usr/local/sbin/raphael-sim-init.sh
 
 [Install]
