@@ -1,0 +1,16 @@
+#!/bin/sh
+PREREQS=""
+case $1 in
+prereqs) echo "$PREREQS"; exit 0;;
+esac
+. /usr/share/initramfs-tools/hook-functions
+
+# 复制所有 a6 开头的固件
+for fw in /lib/firmware/qcom/a6*; do
+    [ -e "$fw" ] && copy_file firmware "$fw"
+done
+
+# 复制所有 ipa 开头的固件
+for fw in /lib/firmware/qcom/ipa*; do
+    [ -e "$fw" ] && copy_file firmware "$fw"
+done

@@ -1,0 +1,22 @@
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index 1080f9acf70a..e26b0fc2536d 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -2390,10 +2390,14 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
+ 		if (!err) {
+ 			src_perms = BIT(QCOM_SCM_VMID_HLOS);
+ 
+-			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
++			/*
++			 * The SM8150 TZ rejects this assignment for the non-secure
++			 * sensor PD with -EINVAL. Failing the probe here drops
++			 * /dev/fastrpc-sdsp and takes the whole sensor stack down,
++			 * so ignore the result, as the vendor Ubuntu build did.
++			 */
++			qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
+ 				    data->vmperms, data->vmcount);
+-			if (err)
+-				goto err_free_data;
+ 		}
+ 
+ 	}
