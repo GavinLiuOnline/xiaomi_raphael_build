@@ -160,12 +160,15 @@ function post_build_image__900_raphael_images() {
 	# temporary SD image, which is never the phone's root. system.img below is
 	# created with RAPHAEL_ROOTFS_UUID, so write the real table right before it
 	# is copied in, and make sure the mount points exist.
-	install -d "${old_root}/boot/efi" "${old_root}/persist"
+	# The persist mount point is /var/lib/rmtfs, not /persist: the sensors package
+	# postinst creates /persist -> /mnt/vendor/persist -> /var/lib/rmtfs, and a
+	# symlinked mount point confuses systemd's mount unit, so mount the real dir.
+	install -d "${old_root}/boot/efi" "${old_root}/var/lib/rmtfs"
 	cat > "${old_root}/etc/fstab" <<- FSTAB
 	UUID=${RAPHAEL_ROOTFS_UUID} / ext4 errors=remount-ro,x-systemd.growfs 0 1
 	PARTLABEL=vendor /boot ext4 errors=remount-ro 0 2
 	PARTLABEL=cust /boot/efi vfat umask=0077 0 1
-	PARTLABEL=persist /persist ext4 nosuid,nodev,noatime 0 1
+	PARTLABEL=persist /var/lib/rmtfs ext4 nosuid,nodev,noatime 0 1
 	FSTAB
 
 	# Armbian runs "apt-get update" (and installs armbian-config) in the image
