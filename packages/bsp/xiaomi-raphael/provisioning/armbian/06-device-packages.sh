@@ -180,6 +180,21 @@ if [ -f "$ALSA_DEB" ]; then
 		echo "[06] ❌ alsa-xiaomi-raphael 未安装成功，设备声音会异常，终止构建" >&2
 		exit 1
 	fi
+
+	# 麦克风守卫：WirePlumber/PulseAudio 在枚举 profile 时会先 open("hw:0,2")
+	# 探测采集设备。Q6 采集路由必须已经在 SectionVerb 里建立，否则探测返回
+	# EINVAL，整个采集设备被丢弃，设备表现为"没有麦克风"。
+	UCM_HIFI="rootdir/usr/share/alsa/ucm2/conf.d/sm8150_raphael/HiFi.conf"
+	ucm_ok=1
+	grep -q 'SectionDevice."Mic"' "$UCM_HIFI" 2>/dev/null || ucm_ok=0
+	grep -q 'CapturePCM "hw:0,2"' "$UCM_HIFI" 2>/dev/null || ucm_ok=0
+	sed -n '/^SectionVerb/,/^SectionDevice/p' "$UCM_HIFI" 2>/dev/null \
+		| grep -q "MultiMedia3 Mixer SLIMBUS_0_TX" || ucm_ok=0
+	if [ "$ucm_ok" != 1 ]; then
+		echo "[06] ❌ $UCM_HIFI 缺少采集路由（SectionVerb 内的 MultiMedia3 Mixer SLIMBUS_0_TX，或 Mic/CapturePCM），设备将没有麦克风，终止构建" >&2
+		exit 1
+	fi
+	echo "[06]   └─ UCM 采集路由校验通过 ✅"
 else
 	echo "[06] ❌ 缺少 $(basename "$ALSA_DEB")，设备声音会异常，终止构建" >&2
 	exit 1

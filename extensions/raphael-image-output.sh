@@ -302,16 +302,15 @@ function post_build_image__900_raphael_images() {
 	local used_mb size_mb
 	used_mb="$(du -sm "${old_root}" | cut -f1)"
 
-	# The stock recovery update-binary is an old minzip without ZIP64 support:
-	# every zip entry and the archive itself must stay below 4 GiB. system.img is
-	# by far the largest entry, so fail here (before copying 3+ GiB) instead of
-	# producing a zip the phone cannot flash. 3.6 GiB leaves room for vendor,
-	# cust, boot and logo inside the same archive.
-	local max_rootfs_mb=3712
+	# system.img is flashed to "userdata" with fastboot, which has no 4 GiB limit.
+	# The stock recovery update-binary is an old minzip without ZIP64 support, so
+	# the flashable zip can only be built below 4 GiB; when the images outgrow
+	# that the zip is skipped (with a warning) instead of failing the build.
+	local max_rootfs_mb=6144
 	if [[ ${used_mb} -gt ${max_rootfs_mb} ]]; then
 		display_alert "Largest directories in rootfs" "$(du -x -m --max-depth=2 "${old_root}" 2> /dev/null | sort -nr | head -12 | awk '{printf "%sM:%s ", $1, $2}')" "wrn"
 		display_alert "Largest directories (depth 3)" "$(du -x -m --max-depth=3 "${old_root}/usr" "${old_root}/var" 2> /dev/null | sort -nr | head -12 | awk '{printf "%sM:%s ", $1, $2}')" "wrn"
-		exit_with_error "rootfs is ${used_mb}M, above the ${max_rootfs_mb}M ZIP64-free limit" \
+		exit_with_error "rootfs is ${used_mb}M, above the ${max_rootfs_mb}M rootfs limit" \
 			"remove unused packages (e.g. fonts-noto-cjk-extra, libreoffice/thunderbird translations) or lower DESKTOP_TIER"
 	fi
 
@@ -404,20 +403,26 @@ function post_build_image__900_raphael_images() {
 	# avoid spending minutes deflating 3+ GiB for a zip the phone cannot read.
 	local zip_input_bytes
 	zip_input_bytes="$(du -sb "${zip_dir}" | cut -f1)"
+	local zip_skipped=0
 	if [[ ${zip_input_bytes} -ge $((4 * 1024 * 1024 * 1024)) ]]; then
-		exit_with_error "flashable zip input is ${zip_input_bytes} bytes, above the 4 GiB the stock recovery can read" \
-			"shrink system.img (see the rootfs size warning above)"
+		zip_skipped=1
+		display_alert "Skipping flashable zip" \
+			"inputs are ${zip_input_bytes} bytes; the stock recovery update-binary cannot read ZIP64 (4 GiB). Flash the .img files with fastboot instead." "wrn"
 	fi
 
-	rm -f "${prefix}.zip"
-	(cd "${zip_dir}" && zip -r -q -X "${prefix}.zip" .)
+	if [[ ${zip_skipped} -eq 0 ]]; then
+		rm -f "${prefix}.zip"
+		(cd "${zip_dir}" && zip -r -q -X "${prefix}.zip" .)
 
-	# Info-ZIP switches to ZIP64 above 4 GiB, which the recovery cannot read.
-	local zip_bytes
-	zip_bytes="$(stat -c %s "${prefix}.zip")"
-	if [[ ${zip_bytes} -ge $((4 * 1024 * 1024 * 1024)) ]]; then
-		exit_with_error "flashable zip is ${zip_bytes} bytes and needs ZIP64, unsupported by the stock recovery update-binary" \
-			"shrink system.img so the whole archive stays below 4 GiB"
+		# Info-ZIP switches to ZIP64 above 4 GiB, which the recovery cannot read.
+		local zip_bytes
+		zip_bytes="$(stat -c %s "${prefix}.zip")"
+		if [[ ${zip_bytes} -ge $((4 * 1024 * 1024 * 1024)) ]]; then
+			rm -f "${prefix}.zip"
+			zip_skipped=1
+			display_alert "Removed flashable zip" \
+				"${zip_bytes} bytes needs ZIP64, unsupported by the stock recovery. Flash the .img files with fastboot instead." "wrn"
+		fi
 	fi
 
 	raphael_image_output_cleanup
@@ -428,8 +433,9 @@ function post_build_image__900_raphael_images() {
 	# waste minutes compressing 6 GiB into output/images. A note keeps the
 	# framework's "<version>.*" move step non-empty.
 	rm -f "${source_image}"
-	printf '%s\n' "Root filesystem converted to xiaomi-k20pro-${version}.system.img / .vendor.img / .cust.img / .boot.img / .zip" \
-		> "${DESTIMG}/${version}.img.txt"
+	local note="Root filesystem converted to xiaomi-k20pro-${version}.system.img / .vendor.img / .cust.img / .boot.img"
+	[[ ${zip_skipped} -eq 0 ]] && note+=" / .zip"
+	printf '%s\n' "${note}" > "${DESTIMG}/${version}.img.txt"
 
 	# The build framework only moves "<version>.*" to the final destination.
 	mkdir -p "${FINALDEST}"

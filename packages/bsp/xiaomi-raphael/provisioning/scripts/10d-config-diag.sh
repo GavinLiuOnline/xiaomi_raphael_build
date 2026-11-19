@@ -55,36 +55,90 @@ cat > rootdir/usr/local/sbin/raphael-slimbus-init.sh << 'EOF'
 # Load the SLIMbus NGD controller only after SLPI (remoteproc0) is running and
 # its QMI services are published. Loading it earlier times out (-110), so
 # wcd9340 never enumerates and snd-sm8150-raphael stays deferred (-517).
-set -eu
+#
+# The driver has no retry of its own: if the slimbus QMI handshake fails it
+# gives up and the sound card stays missing until the module is reloaded.  On
+# the very first boot after flashing (rootfs resize, firstrun, journal init)
+# SLPI comes up much later than on a warm boot, so a single attempt is not
+# enough - retry until the card really shows up in /proc/asound/cards.
+set -u
+
+WAIT_SLPI=180	# seconds to wait for remoteproc0 to reach "running"
+WAIT_CARD=20	# seconds to wait for the codec after loading the module
+MAX_TRIES=6
+RETRY_DELAY=10
+
+log() { echo "raphael-slimbus-init: $*"; }
+
+slpi_running() {
+	[ "$(cat /sys/class/remoteproc/remoteproc0/state 2>/dev/null)" = running ]
+}
+
+card_present() {
+	grep -q 'Raphael' /proc/asound/cards 2>/dev/null
+}
 
 i=0
-while [ "$i" -lt 60 ]; do
-	[ "$(cat /sys/class/remoteproc/remoteproc0/state 2>/dev/null)" = running ] && break
+while [ "$i" -lt "$WAIT_SLPI" ]; do
+	slpi_running && break
 	i=$((i + 1))
 	sleep 1
 done
-if [ "$(cat /sys/class/remoteproc/remoteproc0/state 2>/dev/null)" != running ]; then
-	echo "raphael-slimbus-init: SLPI not running after ${i}s" >&2
+if ! slpi_running; then
+	log "SLPI not running after ${WAIT_SLPI}s"
 	exit 1
 fi
 
 # SLPI needs a few seconds past "running" to serve the slimbus QMI service.
 sleep 10
-modprobe slim_qcom_ngd_ctrl
-echo "raphael-slimbus-init: slimbus controller loaded"
+
+try=1
+while [ "$try" -le "$MAX_TRIES" ]; do
+	if card_present; then
+		log "sound card present"
+		exit 0
+	fi
+
+	# Unload first: a failed QMI handshake leaves the driver dead until it is
+	# re-probed, and a plain modprobe of an already loaded module does nothing.
+	modprobe -r slim_qcom_ngd_ctrl 2>/dev/null || true
+	modprobe slim_qcom_ngd_ctrl || log "modprobe failed"
+
+	j=0
+	while [ "$j" -lt "$WAIT_CARD" ]; do
+		if card_present; then
+			log "sound card ready (attempt ${try})"
+			exit 0
+		fi
+		j=$((j + 1))
+		sleep 1
+	done
+
+	log "attempt ${try}: no sound card yet"
+	try=$((try + 1))
+	[ "$try" -le "$MAX_TRIES" ] && sleep "$RETRY_DELAY"
+done
+
+log "giving up: sound card did not register"
+exit 1
 EOF
 chmod 755 rootdir/usr/local/sbin/raphael-slimbus-init.sh
 
 cat > rootdir/etc/systemd/system/raphael-slimbus-init.service << 'EOF'
 [Unit]
-Description=Raphael load SLIMbus controller after SLPI is ready
+Description=Raphael bring up SLIMbus controller after SLPI is ready
 After=raphael-diag-router.service
 Wants=raphael-diag-router.service
+# First boot can take minutes; keep retrying instead of giving up permanently
+# (a failed oneshot used to leave the device without any sound card).
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
+Type=simple
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/raphael-slimbus-init.sh
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

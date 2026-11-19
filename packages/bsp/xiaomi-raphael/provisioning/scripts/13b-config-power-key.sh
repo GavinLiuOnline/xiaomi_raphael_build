@@ -1,8 +1,21 @@
 #!/bin/bash
 set -e
 
+# 非 GNOME：XFCE 下电源键由 xfce4-power-manager 处理（它持有 handle-power-key
+# inhibitor，logind 不会介入），因此这里只把它的系统级默认动作设为 4（弹出关机
+# 菜单）。用户配置里该属性是 type="empty"，会回落到这个系统默认值，保证每次
+# 开机行为一致。
 if [ "$DESKTOP_ENV" != "gnome" ]; then
-	echo "[$(date +'%Y-%m-%d %H:%M:%S')] [14] ⏭️  非 GNOME 桌面，跳过电源键配置"
+	if [ "$DESKTOP_ENV" = "xfce" ]; then
+		XFPM_XML="rootdir/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+		if [ -f "$XFPM_XML" ]; then
+			sed -i '/name="power-button-action"/ s/value="[0-9]*"/value="4"/' "$XFPM_XML"
+			echo "[$(date +'%Y-%m-%d %H:%M:%S')] [14] 🔘 XFCE 电源键：短按弹出关机菜单"
+		else
+			echo "[$(date +'%Y-%m-%d %H:%M:%S')] [14] ⚠️  未找到 $XFPM_XML，XFCE 电源键保持发行版默认" >&2
+		fi
+	fi
+	echo "[$(date +'%Y-%m-%d %H:%M:%S')] [14] ⏭️  非 GNOME 桌面，跳过电源键守护进程配置"
 	exit 0
 fi
 
