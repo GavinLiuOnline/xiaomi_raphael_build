@@ -1,0 +1,131 @@
+name: "Release: Xiaomi Redmi K20 Pro (raphael)"
+
+#
+# Builds the Armbian image for the Xiaomi Redmi K20 Pro and publishes the
+# flashable artifacts (system/vendor/cust/boot images + recovery zip).
+#
+# Triggers:
+#   * push a tag (e.g. `git tag -a v26.08-k20pro -m "..." && git push origin v26.08-k20pro`)
+#   * manual run (Actions -> Run workflow), which creates/updates that tag
+#
+# Note: GitHub limits a release asset to 2 GiB. system.img is ~3.3 GiB, so it
+# is shipped zstd-compressed (and split into <2 GiB parts if that is still too
+# big); the recovery zip already contains the raw system.img.
+#
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/update (e.g. v26.08-k20pro)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-k20pro-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build image and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      # Armbian needs ~25 GiB free; the runner image carries a lot of unused SDKs.
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift \
+                      /usr/local/share/boost /opt/hostedtoolcache /usr/local/.ghcup \
+                      /usr/local/share/powershell /opt/microsoft /usr/lib/mono || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Build Armbian image
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          DOCKER_PRIVILEGED: "yes"
+        run: |
+          ./compile.sh build \
+            BOARD=xiaomi-raphael \
+            BRANCH=current \
+            BUILD_DESKTOP=yes \
+            DESKTOP_ENVIRONMENT=xfce \
+            DESKTOP_TIER=mid \
+            KERNEL_CONFIGURE=no \
+            RELEASE=resolute
+
+      - name: Collect release assets
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          ls -lh output/images/
+
+          cp output/images/xiaomi-k20pro-*.boot.img release/
+          cp output/images/xiaomi-k20pro-*.vendor.img release/
+          cp output/images/xiaomi-k20pro-*.cust.img release/
+          cp output/images/xiaomi-k20pro-*.zip release/
+
+          command -v zstd > /dev/null || sudo apt-get install -y zstd
+
+          # A single release asset must stay below 2 GiB (GitHub hard limit).
+          system_img=$(ls output/images/xiaomi-k20pro-*.system.img)
+          out="release/$(basename "${system_img}").zst"
+          zstd -T0 -10 --no-progress "${system_img}" -o "${out}"
+
+          limit=$((2 * 1024 * 1024 * 1024))
+          if [[ $(stat -c %s "${out}") -ge ${limit} ]]; then
+            rm -f "${out}"
+            split -b 1900M -d -a 2 "${system_img}" "release/$(basename "${system_img}").part"
+            {
+              echo "system.img is larger than 2 GiB even compressed (GitHub asset limit)."
+              echo "Reassemble it with:"
+              echo "  cat $(basename "${system_img}").part* > $(basename "${system_img}")"
+              echo "On Windows: copy /b $(basename "${system_img}").part00+$(basename "${system_img}").part01 $(basename "${system_img}")"
+            } > release/README-system-img.txt
+          fi
+
+          ls -lh release/
+          (cd release && sha256sum -- ./*.img* ./*.zip ./*.part* > /tmp/sums 2>/dev/null || true
+           mv /tmp/sums SHA256SUMS.txt 2>/dev/null || true)
+
+      - name: Build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: output/logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" release/* --clobber
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            gh release create "${TAG}" release/* \
+              --title "Xiaomi Redmi K20 Pro ${TAG}" \
+              --generate-notes \
+              --target "${GITHUB_SHA}" \
+              --latest
+          else
+            gh release create "${TAG}" release/* \
+              --title "Xiaomi Redmi K20 Pro ${TAG}" \
+              --generate-notes \
+              --latest
+          fi
