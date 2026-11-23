@@ -217,6 +217,14 @@ autologin-user=${USER_NAME:-user}
 autologin-user-timeout=0
 autologin-session=xfce
 EOF
+		# light-locker 在 X 屏保（600 s）触发后经 lightdm Session.Lock 建 greeter，
+		# 设备会无故跳回登录页。构建期还没有 /home/user（首启才建用户），因此直接
+		# 隐藏系统级 autostart。
+		if [ -f rootdir/etc/xdg/autostart/light-locker.desktop ]; then
+			grep -qx 'Hidden=true' rootdir/etc/xdg/autostart/light-locker.desktop || \
+				echo 'Hidden=true' >> rootdir/etc/xdg/autostart/light-locker.desktop
+			echo "[06]   └─ 已禁用 light-locker 自动锁屏"
+		fi
 	fi
 	chroot rootdir systemctl disable brltty.service 2>/dev/null || true
 	chroot rootdir systemctl mask brltty.service 2>/dev/null || true
