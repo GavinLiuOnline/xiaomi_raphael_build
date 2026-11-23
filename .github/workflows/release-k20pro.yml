@@ -52,6 +52,15 @@ jobs:
           sudo apt-get clean
           df -h /
 
+      # The runner kernel is amd64 and carries no arm64 handler, so Armbian's
+      # in-container update-binfmts fails and arch-test rejects the build.
+      # Register the handlers on the host kernel first; the knobs are global,
+      # so the build container sees them and skips its own registration.
+      - name: Set up QEMU binfmt handlers
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
       - name: Build Armbian image
         env:
           DEBIAN_FRONTEND: noninteractive
